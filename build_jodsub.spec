@@ -2,6 +2,7 @@
 hidden = [
     "numpy", "soundfile", "torch", "transformers", "whisperx",
     "faster_whisper", "laonlp", "whisper", "pyannote.audio",
+    "webview", "webview.platforms.cocoa",
 ]
 
 a = Analysis(
@@ -20,5 +21,5 @@ a = Analysis(
     noarchive=False,
 )
 pyz = PYZ(a.pure)
-exe = EXE(pyz, a.scripts, a.binaries, a.datas, name="JodSub", console=True)
+exe = EXE(pyz, a.scripts, a.binaries, a.datas, name="JodSub", console=False)
 app = BUNDLE(exe, name="JodSub.app", icon="assets/JodSub.icns", bundle_identifier="com.jodsub.app")

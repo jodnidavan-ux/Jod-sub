@@ -2849,7 +2849,19 @@ class App(SimpleHTTPRequestHandler):
         return self.json({"id":project_id,"project":data})
 
 if __name__ == "__main__":
-    os.chdir(ROOT); print(f"JodSub: http://127.0.0.1:{PORT}")
-    if PACKAGED:
-        threading.Timer(0.8, lambda: webbrowser.open(f"http://127.0.0.1:{PORT}/")).start()
-    ThreadingHTTPServer(("127.0.0.1",PORT),App).serve_forever()
+    os.chdir(ROOT)
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), App)
+    server_thread = threading.Thread(target=server.serve_forever, name="jodsub-http", daemon=True)
+    server_thread.start()
+    url = f"http://127.0.0.1:{PORT}/"
+    try:
+        import webview
+    except ImportError:
+        # Keep source/developer installs usable without the optional native UI.
+        print(f"JodSub: {url}")
+        webbrowser.open(url)
+        server_thread.join()
+    else:
+        webview.create_window("JodSub", url, width=1440, height=920, min_size=(960, 640))
+        webview.start()
+        server.shutdown()
