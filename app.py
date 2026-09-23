@@ -82,7 +82,9 @@ CAPCUT_USER_DATA = Path.home() / "Movies" / "CapCut" / "User Data"
 CAPCUT_ADJUSTMENT_CACHE = CAPCUT_USER_DATA / "Cache" / "onlineMaterial"
 CAPCUT_FACE_PRESETS = CAPCUT_USER_DATA / "Presets" / "BeautyFace"
 for folder in (WORK, PROJECTS, EXPORTS, SFX, EDITING_STYLE_ROOT, EDITING_STYLE_REPORTS):
-    folder.mkdir(exist_ok=True)
+    # Packaged installs may start on a clean Mac where DATA_ROOT and its
+    # parent directories do not exist yet.
+    folder.mkdir(parents=True, exist_ok=True)
 
 def ensure_bundled_sfx():
     """Seed writable per-user SFX storage from bundled defaults once."""
