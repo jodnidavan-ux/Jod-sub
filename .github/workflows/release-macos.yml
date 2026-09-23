@@ -4,16 +4,24 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version, e.g. 0.1.1"
+        description: "Release version, e.g. 0.1.4"
         required: true
-        default: "0.1.1"
+        default: "0.1.4"
 
 permissions:
   contents: write
 
 jobs:
   build:
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            arch: intel
+          - runner: macos-14
+            arch: apple-silicon
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -23,13 +31,28 @@ jobs:
         run: python -m pip install --upgrade pip pyinstaller numpy soundfile
       - name: Build app
         run: pyinstaller --noconfirm --clean build_jodsub.spec
-      - name: Package ZIP
-        run: |
-          ditto -c -k --sequesterRsrc --keepParent dist/JodSub.app "JodSub-${{ inputs.version }}.zip"
+      - name: Package architecture-specific ZIP
+        run: ditto -c -k --sequesterRsrc --keepParent dist/JodSub.app "JodSub-${{ inputs.version }}-${{ matrix.arch }}.zip"
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: JodSub-${{ inputs.version }}-${{ matrix.arch }}
+          path: JodSub-${{ inputs.version }}-${{ matrix.arch }}.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: JodSub-*
+          merge-multiple: true
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ inputs.version }}
           name: JodSub v${{ inputs.version }}
           generate_release_notes: true
-          files: JodSub-${{ inputs.version }}.zip
+          files: release-assets/*.zip
