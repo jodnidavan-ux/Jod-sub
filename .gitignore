@@ -1,0 +1,22 @@
+# Local/user data — never commit media, projects, exports, models, or secrets.
+work/
+projects/
+exports/
+editing_style/profile.json
+editing_style/reports/
+editing_style/references/
+models/
+pppp/
+ videon oljiner/
+dist/
+build/
+*.app
+*.zip
+.DS_Store
+__pycache__/
+*.py[cod]
+.env
+.env.*
+*.key
+*.p12
+*.p8
