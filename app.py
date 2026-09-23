@@ -2858,7 +2858,15 @@ class App(SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     os.chdir(ROOT)
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), App)
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", PORT), App)
+    except OSError as exc:
+        # A previous JodSub instance may still own the default port. Start
+        # this instance on an ephemeral localhost port instead of crashing.
+        if getattr(exc, "errno", None) != 48:
+            raise
+        server = ThreadingHTTPServer(("127.0.0.1", 0), App)
+        PORT = server.server_address[1]
     server_thread = threading.Thread(target=server.serve_forever, name="jodsub-http", daemon=True)
     server_thread.start()
     url = f"http://127.0.0.1:{PORT}/"
