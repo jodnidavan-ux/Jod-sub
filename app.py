@@ -10,6 +10,7 @@ import os
 import random
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import threading
@@ -23,6 +24,13 @@ from pathlib import Path
 from urllib import error as urlerror
 from urllib import request as urlrequest
 from urllib.parse import unquote, urlencode
+
+try:
+    import certifi
+except ImportError:  # Optional in source installs; packaged builds include it.
+    certifi = None
+
+SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where()) if certifi else ssl.create_default_context()
 from editing_style import add_manual_removed_words, analyze_capcut_reference, load_profile as load_editing_profile, save_profile as save_editing_profile, update_profile as update_editing_profile
 
 def urlopen_retry(request, timeout=60, attempts=3):
@@ -30,7 +38,7 @@ def urlopen_retry(request, timeout=60, attempts=3):
     last = None
     for attempt in range(max(1, attempts)):
         try:
-            return urlrequest.urlopen(request, timeout=timeout)
+            return urlrequest.urlopen(request, timeout=timeout, context=SSL_CONTEXT)
         except urlerror.HTTPError as exc:
             last = exc
             # Authentication and validation failures are deterministic.  Only

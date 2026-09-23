@@ -1,8 +1,10 @@
 # PyInstaller build for the local-first JodSub macOS application.
+import certifi
+
 hidden = [
     "numpy", "soundfile", "torch", "transformers", "whisperx",
     "faster_whisper", "laonlp", "whisper", "pyannote.audio",
-    "webview", "webview.platforms.cocoa",
+    "webview", "webview.platforms.cocoa", "certifi",
 ]
 
 a = Analysis(
@@ -15,6 +17,7 @@ a = Analysis(
         ("sfx", "sfx"),
         ("bin/ffmpeg", "bin"),
         ("assets/JodSub.icns", "."),
+        (certifi.where(), "certifi"),
     ],
     hiddenimports=hidden,
     excludes=["tkinter"],
