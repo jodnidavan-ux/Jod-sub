@@ -13,6 +13,7 @@ a = Analysis(
         ("editing_style.py", "."),
         ("sfx", "sfx"),
         ("bin/ffmpeg", "bin"),
+        ("assets/JodSub.icns", "."),
     ],
     hiddenimports=hidden,
     excludes=["tkinter"],
@@ -20,4 +21,4 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, a.binaries, a.datas, name="JodSub", console=True)
-app = BUNDLE(exe, name="JodSub.app", icon=None, bundle_identifier="com.jodsub.app")
+app = BUNDLE(exe, name="JodSub.app", icon="assets/JodSub.icns", bundle_identifier="com.jodsub.app")
