@@ -5,6 +5,7 @@ import base64
 import copy
 from difflib import SequenceMatcher
 import html
+import hashlib
 import json
 import os
 import random
@@ -90,6 +91,36 @@ WHISPERX_V3_DIR = (DATA_ROOT / "models" if PACKAGED else ROOT / "models") / "whi
 WHISPERX_V3 = None
 CAPCUT_USER_DATA = Path.home() / "Movies" / "CapCut" / "User Data"
 CAPCUT_ADJUSTMENT_CACHE = CAPCUT_USER_DATA / "Cache" / "onlineMaterial"
+LAO_MODEL_REPO = "https://huggingface.co/SiangLao/xls-r-lao-asr/resolve/main/"
+LAO_MODEL_FILES = ("config.json", "preprocessor_config.json", "tokenizer_config.json", "special_tokens_map.json", "added_tokens.json", "vocab.json", "model.safetensors")
+LAO_MODEL_SHA256 = "0282c350405915a500648ae0dca13cc5523cac618c5b80984eec0840259a017a"
+
+def lao_model_ready():
+    return (LAO_AUDITOR_DIR / "model.safetensors").is_file()
+
+def download_lao_model():
+    """Download the Lao alignment model atomically, with a fixed checksum."""
+    global STATUS
+    target = DATA_ROOT / "models" / "lao-asr"
+    target.mkdir(parents=True, exist_ok=True)
+    STATUS = {"state":"working", "message":"ກຳລັງດາວໂຫຼດ Lao alignment model (ປະມານ 1.2 GB)…", "progress":1, "files":[]}
+    try:
+        for index, name in enumerate(LAO_MODEL_FILES, 1):
+            destination = target / name
+            if destination.is_file() and destination.stat().st_size > 0:
+                continue
+            temporary = destination.with_suffix(destination.suffix + ".part")
+            request = urlrequest.Request(LAO_MODEL_REPO + name, headers={"User-Agent":"JodSub/1.0"})
+            with urlopen_retry(request, timeout=120, attempts=3) as response, temporary.open("wb") as output:
+                shutil.copyfileobj(response, output, length=1024 * 1024)
+            temporary.replace(destination)
+            STATUS["progress"] = min(95, 5 + index * 90 // len(LAO_MODEL_FILES))
+        digest = hashlib.sha256((target / "model.safetensors").read_bytes()).hexdigest()
+        if digest != LAO_MODEL_SHA256:
+            raise RuntimeError("checksum ຂອງ Lao model ບໍ່ກົງ; ໄຟລ໌ອາດເສຍຫາຍ.")
+        STATUS = {"state":"done", "message":"ດາວໂຫຼດ Lao alignment model ສຳເລັດແລ້ວ.", "progress":100, "files":[]}
+    except Exception as exc:
+        STATUS = {"state":"error", "message":f"ດາວໂຫຼດ Lao model ບໍ່ສຳເລັດ: {str(exc)[:300]}", "progress":0, "files":[]}
 
 def seed_editing_style_profile():
     """Load the bundled reference once, without overwriting user feedback."""
@@ -2750,6 +2781,7 @@ class App(SimpleHTTPRequestHandler):
         self.send_response(code); self.send_header("Content-Type", "application/json; charset=utf-8"); self.end_headers(); self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
     def do_GET(self):
         if self.path == "/api/status": return self.json(STATUS)
+        if self.path == "/api/lao-model": return self.json({"ready":lao_model_ready(), "path":str(LAO_AUDITOR_DIR)})
         if self.path == "/api/precision-model":
             size = OPENAI_WHISPER_V3_FILE.stat().st_size if OPENAI_WHISPER_V3_FILE.is_file() else 0
             return self.json({"whisperx":whisperx_v3_ready(), "openaiLargeV3":openai_whisper_v3_ready(), "downloadedBytes":size, "totalBytes":OPENAI_WHISPER_V3_SIZE})
@@ -2779,6 +2811,10 @@ class App(SimpleHTTPRequestHandler):
         self.path = "index.html"; return super().do_GET()
     def do_POST(self):
         global STATUS
+        if self.path == "/api/lao-model/download":
+            if STATUS["state"] == "working": return self.json({"error":"busy"}, 409)
+            threading.Thread(target=download_lao_model, daemon=True).start()
+            return self.json({"ok":True}, 202)
         if self.path == "/api/render":
             length = int(self.headers.get("Content-Length", 0)); payload = json.loads(self.rfile.read(length)); project_id = payload["id"]
             if STATUS["state"] == "working": return self.json({"error":"busy"},409)
