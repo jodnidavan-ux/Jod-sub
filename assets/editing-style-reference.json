@@ -1,0 +1,26 @@
+{
+  "id": "09797a1fda3c480ab2fabb685f89ef20",
+  "created_at": 1790218747.232137,
+  "source_video": "reference",
+  "capcut_timeline": "editing-style-1790218747-09797a1f",
+  "source_duration_s": 57.54,
+  "edited_duration_s": 34.466664,
+  "removed_segments": [],
+  "audio_measurement": {
+    "noise_floor_db": -38.16091526431946,
+    "candidate_activity_threshold_db": -32.16
+  },
+  "silence_observations": {
+    "count": 15,
+    "minimum_ms": 166.667,
+    "maximum_ms": 1200.0,
+    "average_ms": 511.1,
+    "pre_roll_ms": 30.0,
+    "post_roll_ms": 40.0
+  },
+  "subtitle_comparison": {
+    "available": true,
+    "removed_words": []
+  },
+  "limitations": ["Imported from the user's Editing Style reference export."]
+}

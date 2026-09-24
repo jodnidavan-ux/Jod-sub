@@ -74,6 +74,8 @@ SFX_RESOURCE = ROOT / "sfx"
 EDITING_STYLE_ROOT = DATA_ROOT / "editing_style"
 EDITING_STYLE_PROFILE = EDITING_STYLE_ROOT / "profile.json"
 EDITING_STYLE_REPORTS = EDITING_STYLE_ROOT / "reports"
+# A bundled reference gives fresh installations one real editing-style sample.
+EDITING_STYLE_SEED = ROOT / "assets" / "editing-style-reference.json"
 KARNSUB_APK = Path(os.environ.get("JODSUB_KARNSUB_APK", str(ROOT / "KarnSub.apk")))
 CAPCUT_ROOT = Path.home() / "Movies" / "CapCut" / "User Data" / "Projects" / "com.lveditor.draft"
 _dev_lao_model = Path("/Users/apple/Documents/Codex/2026-09-18/new-chat/outputs/LaoCaptioner/lao_models/models--SiangLao--xls-r-lao-asr/snapshots/dfc9daab5b2bdf523b01a937ea31e144af5d23c1")
@@ -88,6 +90,19 @@ WHISPERX_V3_DIR = (DATA_ROOT / "models" if PACKAGED else ROOT / "models") / "whi
 WHISPERX_V3 = None
 CAPCUT_USER_DATA = Path.home() / "Movies" / "CapCut" / "User Data"
 CAPCUT_ADJUSTMENT_CACHE = CAPCUT_USER_DATA / "Cache" / "onlineMaterial"
+
+def seed_editing_style_profile():
+    """Load the bundled reference once, without overwriting user feedback."""
+    if not EDITING_STYLE_SEED.is_file() or EDITING_STYLE_PROFILE.is_file():
+        return
+    try:
+        report = json.loads(EDITING_STYLE_SEED.read_text(encoding="utf-8"))
+        profile = update_editing_profile(load_editing_profile(EDITING_STYLE_PROFILE), report)
+        save_editing_profile(EDITING_STYLE_PROFILE, profile)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return
+
+seed_editing_style_profile()
 CAPCUT_FACE_PRESETS = CAPCUT_USER_DATA / "Presets" / "BeautyFace"
 for folder in (WORK, PROJECTS, EXPORTS, SFX, EDITING_STYLE_ROOT, EDITING_STYLE_REPORTS):
     # Packaged installs may start on a clean Mac where DATA_ROOT and its

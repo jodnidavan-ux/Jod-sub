@@ -17,6 +17,7 @@ a = Analysis(
         ("sfx", "sfx"),
         ("bin/ffmpeg", "bin"),
         ("assets/JodSub.icns", "."),
+        ("assets/editing-style-reference.json", "assets"),
         (certifi.where(), "certifi"),
     ],
     hiddenimports=hidden,
