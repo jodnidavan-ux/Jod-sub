@@ -3,6 +3,7 @@
 import cgi
 import base64
 import copy
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
 import html
 import hashlib
@@ -370,26 +371,42 @@ def sfx_events(captions, requested, seed):
     for number, line in enumerate(chosen):
         used[line] += 1; caption = captions[line]; start, end = float(caption["start"]), float(caption["end"])
         kind = scored(line)[1] if scored(line)[0] >= 100 else neutral[number % len(neutral)]
-        # Keep the opening and closing cues consistent across every future
-        # copy: first SFX is Zoom In, final SFX is Zoom Out.
-        if number == 0:
-            kind = "zoom_in"
-        elif number == len(chosen) - 1 and len(chosen) > 1:
-            kind = "zoom_out"
         if kind not in clips: kind = "ding"
-        if number == 0:
-            selected = semantic_sfx_catalog()["zoom_in"]
-        elif number == len(chosen) - 1 and len(chosen) > 1:
-            selected = semantic_sfx_catalog()["zoom_out"]
-        else:
-            selected = clips[kind][used_kinds[kind] % len(clips[kind])]; used_kinds[kind] += 1
+        selected = clips[kind][used_kinds[kind] % len(clips[kind])]; used_kinds[kind] += 1
         clip = one_second_sfx(selected)
         events.append({"time":round(slot_times[number], 6), "file":str(clip), "label":selected.stem, "kind":kind, "caption_index":line})
     return sorted(events, key=lambda event:event["time"])
 
+def sfx_events_with_edges(captions, requested, seed, config=None, timeline_end=None):
+    """Add explicit opening/closing cues without consuming automatic SFX slots."""
+    config = config or {}
+    events = sfx_events(captions, requested, seed) if int(requested or 0) else []
+    if timeline_end is None:
+        timeline_end = max((float(item.get("end", 0)) for item in captions), default=0.0)
+    timeline_end = max(0.0, float(timeline_end or 0))
+    choices = {"click":"click", "zoom":"zoom_in", "zoom_in":"zoom_in", "zoom_out":"zoom_out"}
+    catalog = semantic_sfx_catalog()
+    opening = choices.get(str(config.get("openingSfx", "click")).strip().lower())
+    closing_value = str(config.get("closingSfx", "zoom")).strip().lower()
+    closing = "zoom_out" if closing_value == "zoom" else choices.get(closing_value)
+    if opening and timeline_end > .05:
+        clip = one_second_sfx(catalog[opening])
+        events.append({"time":0.0, "file":str(clip), "label":f"opening-{opening}", "kind":opening, "edge":"opening"})
+    if closing and timeline_end > .05:
+        clip = one_second_sfx(catalog[closing])
+        events.append({"time":round(max(0.0, timeline_end - 1.0), 6), "file":str(clip), "label":f"closing-{closing}", "kind":closing, "edge":"closing"})
+    return sorted(events, key=lambda event:(float(event["time"]), event.get("edge", "middle")))
+
 def lao_tokens(text):
     """Port the LaoCaptioner grouping logic into JodSub without importing that app."""
-    text = re.sub(r"\s+", "", str(text))
+    raw = str(text).strip()
+    # Mixed Lao/English captions need explicit token boundaries.  Removing all
+    # spaces used to turn "iPhone 15 Pro" into "iPhone15Pro".
+    if any(char.isascii() and char.isalnum() for char in raw):
+        mixed = re.findall(r"[A-Za-z0-9]+(?:[._+%#@&'/-][A-Za-z0-9]+)*|[\u0e80-\u0eff]+", raw)
+        if mixed:
+            return mixed
+    text = re.sub(r"\s+", "", raw)
     if not text: return []
     try:
         from laonlp import word_tokenize
@@ -398,6 +415,47 @@ def lao_tokens(text):
     except Exception:
         # Keep text intact rather than inventing unsafe character-level words.
         return [text]
+
+def transcript_token(value):
+    """Keep Lao, spoken digits, and product names in Latin script intact."""
+    allowed = []
+    for char in str(value):
+        if ("\u0e80" <= char <= "\u0eff") or char.isascii() and (char.isalnum() or char in " -_./+%#@&'"):
+            allowed.append(char)
+    return "".join(allowed).strip()
+
+def normalize_mixed_transcript(text):
+    """Restore digits/brand spelling that speech models often Lao-translate."""
+    value = str(text or "").strip()
+    # Longest phrases first so compound numbers are not partially replaced.
+    number_phrases = {
+        "ສອງພັນຊາວຫົກ":"2026", "ສອງພັນຊາວຫ້າ":"2025",
+        "ສາມຈຸດຫ້າ":"3.5", "ສິບຫ້າ":"15", "ສິບສອງ":"12",
+        "ສິບເອັດ":"11", "ຊາວ":"20", "ສາມ":"3", "ສອງ":"2",
+        "ໜຶ່ງ":"1", "ຫນຶ່ງ":"1", "ຫ້າ":"5", "ຫົກ":"6",
+        "ເຈັດ":"7", "ແປດ":"8", "ເກົ້າ":"9", "ສິບ":"10", "ສູນ":"0",
+    }
+    for source, target in sorted(number_phrases.items(), key=lambda item: len(item[0]), reverse=True):
+        value = value.replace(source, target)
+    brand_phrases = {
+        "ໄອໂຟນ":"iPhone", "ແມັກບຸກ":"MacBook", "ແຄັບຄັດ":"CapCut",
+        "ຊຳຊຸງ":"Samsung", "ເຟສບຸກ":"Facebook", "ຈອດຊັບ":"JodSub",
+    }
+    for source, target in brand_phrases.items():
+        value = value.replace(source, target)
+    return value
+
+def join_caption_words(words):
+    """Lao words join naturally; keep Latin product names and numbers readable."""
+    result = ""
+    for item in words:
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+        if result and not result[-1].isspace() and ((result[-1].isascii() and result[-1].isalnum()) or (text[0].isascii() and text[0].isalnum())):
+            result += " "
+        result += text
+    return result
 
 def timed_words(caption):
     """Preserve Gemini's word times; derive times only for imported plain SRT."""
@@ -409,12 +467,14 @@ def timed_words(caption):
             item_start, item_end = float(item["start"]), float(item["end"])
         except (KeyError, TypeError, ValueError):
             continue
-        tokens = lao_tokens(item.get("text", ""))
-        if tokens and item_end > item_start:
-            weight, cursor = max(1, sum(len(token) for token in tokens)), item_start
-            for index, token in enumerate(tokens):
-                token_end = item_end if index == len(tokens) - 1 else cursor + (item_end - item_start) * len(token) / weight
-                result.append({"start":cursor, "end":token_end, "text":token}); cursor = token_end
+        # Provider word_info already contains the authoritative boundary for
+        # this unit.  Do not run Lao tokenization on it: splitting a timed Lao
+        # unit can separate combining vowels/marks and move them into the next
+        # subtitle block.  Tokenization is only used below for plain SRT text
+        # that has no per-word timing at all.
+        text = str(item.get("text", "")).strip()
+        if text and item_end > item_start:
+            result.append({"start":item_start, "end":item_end, "text":text})
     if result: return result
     tokens = lao_tokens(caption.get("text", "")); total = max(1, sum(len(token) for token in tokens)); cursor = start
     for index, token in enumerate(tokens):
@@ -464,7 +524,7 @@ def validate_provider_word_timing(project):
                 f"subtitle ແຖວ {row_number} ສູນເສຍ word timestamps; "
                 "ກະລຸນາຖອດສຽງໃໝ່ກ່ອນສົ່ງເຂົ້າ CapCut."
             )
-        joined = "".join(str(word.get("text", "")) for word in words)
+        joined = join_caption_words(words)
         if joined != str(caption.get("text", "")):
             raise RuntimeError(
                 f"subtitle ແຖວ {row_number} ຖືກແກ້ຂໍ້ຄວາມແຕ່ word timestamps ບໍ່ກົງ; "
@@ -996,7 +1056,7 @@ def whisperx_v3_lao_word_times(wav_path):
         words = []
         for segment in output.get("segments", []):
             for item in segment.get("words", []):
-                text = "".join(char for char in str(item.get("word", "")) if "\u0e80" <= char <= "\u0eff")
+                text = transcript_token(item.get("word", ""))
                 if text and float(item.get("end", 0)) > float(item.get("start", 0)):
                     words.append({"start":float(item["start"]), "end":float(item["end"]), "text":text})
         return words
@@ -1063,7 +1123,7 @@ def whisperx_diarized_captions(video, hf_token, words_per_caption, fast=False):
             while cursor < len(words) and len(group) < limit and words[cursor]["speaker"] == speaker:
                 group.append(words[cursor]); cursor += 1
             label = speaker.replace("SPEAKER_", "Speaker ")
-            captions.append({"start":group[0]["start"], "end":group[-1]["end"], "text":"".join(item["text"] for item in group), "speaker":label, "words":[{k:v for k,v in item.items() if k != "speaker"} for item in group]})
+            captions.append({"start":group[0]["start"], "end":group[-1]["end"], "text":join_caption_words(group), "speaker":label, "words":[{k:v for k,v in item.items() if k != "speaker"} for item in group]})
         return captions
     finally:
         wav.unlink(missing_ok=True)
@@ -1147,7 +1207,7 @@ def whisper_v3_lao_word_times(wav_path):
         words = []
         for segment in output.get("segments", []):
             for item in segment.get("words", []):
-                text = "".join(char for char in str(item.get("word", "")) if "\u0e80" <= char <= "\u0eff")
+                text = transcript_token(item.get("word", ""))
                 if text and float(item.get("end", 0)) > float(item.get("start", 0)):
                     words.append({"start":float(item["start"]), "end":float(item["end"]), "text":text})
         return words
@@ -1259,6 +1319,59 @@ def primary_video_segment(data):
     if not candidates: raise RuntimeError("CapCut project ບໍ່ມີ video segment ໃຫ້ຕັດ Dead Air.")
     return max(candidates, key=lambda item:item[0])
 
+def capcut_timeline_audio(data, output):
+    """Render the selected CapCut timeline's audio in timeline order.
+
+    This avoids exporting a video just to transcribe it: each video segment is
+    trimmed from its original media and concatenated at its timeline position.
+    """
+    materials = {item.get("id"): item for item in data.get("materials", {}).get("videos", [])}
+    segments = []
+    for track in data.get("tracks", []):
+        if track.get("type") != "video":
+            continue
+        for segment in track.get("segments", []):
+            material = materials.get(segment.get("material_id")) or {}
+            path = Path(material.get("path") or material.get("media_path") or "")
+            if not path.is_file() and material.get("material_name"):
+                # CapCut keeps absolute paths from the source computer.  When
+                # a draft is copied to another Mac, resolve the same basename
+                # in the user's common media folders.
+                name = Path(str(material["material_name"])).name
+                for root in (Path.home() / "Downloads", Path.home() / "Desktop", Path.home() / "Movies"):
+                    candidate = root / name
+                    if candidate.is_file():
+                        path = candidate
+                        break
+            source = segment.get("source_timerange", {})
+            target = segment.get("target_timerange", {})
+            start = max(0.0, float(source.get("start", 0)) / 1e6)
+            duration = max(0.0, float(source.get("duration", 0)) / 1e6)
+            target_start = max(0.0, float(target.get("start", 0)) / 1e6)
+            if path.is_file() and duration > .001:
+                segments.append((target_start, path, start, duration))
+    segments.sort(key=lambda item: item[0])
+    if not segments:
+        raise RuntimeError("CapCut timeline ບໍ່ມີ video clip ສຳລັບຖອດສຽງ.")
+    filters, inputs = [], []
+    cursor = 0.0
+    for index, (target_start, path, start, duration) in enumerate(segments):
+        inputs += ["-i", str(path)]
+        if target_start > cursor + .001:
+            gap = target_start - cursor
+            filters.append(f"aevalsrc=0:d={gap:.6f}:s=16000[a{index}gap]")
+        label = f"a{index}"
+        filters.append(f"[{index}:a]atrim=start={start:.6f}:duration={duration:.6f},asetpts=PTS-STARTPTS[{label}]")
+        cursor = max(cursor, target_start) + duration
+    labels = []
+    for index, (target_start, _path, _start, _duration) in enumerate(segments):
+        if index and target_start > segments[index - 1][0] + segments[index - 1][3] + .001:
+            labels.append(f"a{index}gap")
+        labels.append(f"a{index}")
+    concat = ";".join(filters) + ";" + "".join(f"[{label}]" for label in labels) + f"concat=n={len(labels)}:v=0:a=1[out]"
+    subprocess.run([ffmpeg(), "-y", *inputs, "-filter_complex", concat, "-map", "[out]", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(output)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    return output
+
 def enabled_config_flag(value):
     """Interpret persisted checkbox values without treating ``"false"`` as true."""
     if isinstance(value, bool):
@@ -1336,8 +1449,11 @@ def calibrate_word_clock(words, audio_duration):
     reported_end = max(float(word.get("end", 0)) for word in words)
     if reported_end <= audio_duration + .20: return copy.deepcopy(words), 1.0
     scale = audio_duration / reported_end
-    if not .84 <= scale < .996:
-        raise RuntimeError(f"ເວລາ subtitle ({reported_end:.3f}s) ບໍ່ກົງກັບສຽງ ({audio_duration:.3f}s) ຫຼາຍເກີນໄປ; ບໍ່ໄດ້ບີບເວລາແບບຄາດເດົາ.")
+    # Native Gemini may return the source-media clock even when CapCut gave us
+    # a shortened timeline.  A monotonic clock with a single end-scale error
+    # is safe to normalize; rejecting it leaves a 979s subtitle on a 39s clip.
+    if scale <= 0 or scale > 1.05:
+        raise RuntimeError(f"ເວລາ subtitle ({reported_end:.3f}s) ບໍ່ກົງກັບສຽງ ({audio_duration:.3f}s); ກວດ Timeline 1 ແລະ media source.")
     calibrated = []
     for word in words:
         start, end = float(word["start"]) * scale, float(word["end"]) * scale
@@ -1362,7 +1478,7 @@ def local_realign_captions(video_path, captions, words_per_caption):
         aligned = []
         for index in range(0, len(words), words_per_caption):
             group = words[index:index + words_per_caption]
-            aligned.append({"start":group[0]["start"], "end":group[-1]["end"], "text":"".join(item["text"] for item in group), "words":copy.deepcopy(group)})
+            aligned.append({"start":group[0]["start"], "end":group[-1]["end"], "text":join_caption_words(group), "words":copy.deepcopy(group)})
         aligned = correct_caption_phase(wav, aligned)
         aligned = snap_caption_edges(wav, aligned)
         return format_captions(aligned, words_per_caption), scale
@@ -1461,7 +1577,7 @@ def groq_audio_captions(video, api_key, words_per_caption):
         for item in raw_words:
             raw_text = str(item.get("word", item.get("text", ""))).strip()
             raw_script.append(raw_text)
-            text = "".join(char for char in raw_text if "\u0e80" <= char <= "\u0eff")
+            text = transcript_token(raw_text)
             try: start, end = float(item["start"]), float(item["end"])
             except (KeyError, TypeError, ValueError): continue
             if not text or end <= start: continue
@@ -1483,7 +1599,7 @@ def groq_audio_captions(video, api_key, words_per_caption):
         clean_words, scale = calibrate_word_clock(clean_words, duration)
         STATUS.update({"message":"ກຳລັງຈັບຂອບຄຳດ້ວຍ Lao CTC ຫຼັງ Whisper Large‑V3 (78%)", "progress":78})
         clean_words = force_align_lao_words(wav, clean_words, words_per_caption)
-        captions = [{"start":group[0]["start"], "end":group[-1]["end"], "text":"".join(item["text"] for item in group), "words":copy.deepcopy(group)} for index in range(0, len(clean_words), words_per_caption) for group in [clean_words[index:index + words_per_caption]]]
+        captions = [{"start":group[0]["start"], "end":group[-1]["end"], "text":join_caption_words(group), "words":copy.deepcopy(group)} for index in range(0, len(clean_words), words_per_caption) for group in [clean_words[index:index + words_per_caption]]]
         captions = correct_caption_phase(wav, captions)
         captions = snap_caption_edges(wav, captions)
         return format_captions(captions, words_per_caption)
@@ -1517,7 +1633,7 @@ def gemini_tail_words(wav_path, api_key, model, offset, duration):
         subprocess.run([ffmpeg(), "-y", "-i", str(tail_wav), "-c:a", "libmp3lame", "-b:a", "24k", str(tail_audio)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         prompt = ("Transcribe every spoken Lao word in this audio tail. Return ONLY valid JSON with this exact shape: "
                   '{"words":[{"start":0.000,"end":0.000,"text":"ລາວ"}]}. '
-                  "Timestamps are relative to the beginning of this tail. Include every word through the end; do not stop early; Lao script only; do not add spaces.")
+                  "Timestamps are relative to the beginning of this tail. Include every word through the end; do not stop early. Preserve digits exactly (for example 2026, 15, 3.5) and preserve English product/brand names in English.")
         payload = {"contents":[{"parts":[{"text":prompt},{"inlineData":{"mimeType":"audio/mpeg","data":base64.b64encode(tail_audio.read_bytes()).decode("ascii")}}]}], "generationConfig":{"responseMimeType":"application/json", "temperature":0}}
         request = urlrequest.Request(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent", data=json.dumps(payload).encode(), headers={"Content-Type":"application/json", "x-goog-api-key":api_key}, method="POST")
         with urlopen_retry(request, timeout=240) as response: body = json.loads(response.read().decode())
@@ -1525,7 +1641,7 @@ def gemini_tail_words(wav_path, api_key, model, offset, duration):
         decoded = json.loads(re.search(r"\{[\s\S]*\}", raw).group(0))
         result = []
         for word in decoded.get("words", []):
-            text = "".join(char for char in str(word.get("text", "")) if "\u0e80" <= char <= "\u0eff")
+            text = transcript_token(word.get("text", ""))
             start, end = float(word["start"]) + offset, float(word["end"]) + offset
             if text and end > start: result.append({"start":start, "end":end, "text":text})
         return result
@@ -1622,7 +1738,7 @@ def gemini_native_word_times(audio, api_key):
                 for item in content.get("annotations", []) or []:
                     if item.get("type") != "word_info": continue
                     start, end = _seconds_offset(item.get("start_offset")), _seconds_offset(item.get("end_offset"))
-                    text = "".join(char for char in str(item.get("text", "")) if "\u0e80" <= char <= "\u0eff")
+                    text = normalize_mixed_transcript(transcript_token(item.get("text", "")))
                     if text and start is not None and end is not None and end > start:
                         # Keep native annotation units intact.  Lao segmentation
                         # happens later only for display rows, not timing.
@@ -1633,15 +1749,20 @@ def gemini_native_word_times(audio, api_key):
     finally:
         gemini_delete_file(file_info.get("name", ""), api_key)
 
-def gemini_prompted_word_times(audio, api_key, selected_model):
+def gemini_prompted_word_times(audio, api_key, selected_model, available_model_ids=None):
     """Fallback for Gemini models that return text but not native word_info."""
-    models = gemini_models(api_key)
-    ids = [str(item.get("id", "")) for item in models if item.get("id")]
+    if available_model_ids is None:
+        models = gemini_models(api_key)
+        ids = [str(item.get("id", "")) for item in models if item.get("id")]
+    else:
+        ids = [str(item) for item in available_model_ids if item]
     if selected_model and selected_model != "auto": ids = [selected_model]
     if not ids: raise RuntimeError("API key ນີ້ບໍ່ມີ Gemini model ທີ່ໃຊ້ໄດ້.")
-    prompt = ('Transcribe every spoken Lao word. Return ONLY JSON with this exact shape: '
+    prompt = ('Transcribe the complete Lao speech without stopping early. Return ONLY JSON with this exact shape: '
               '{"words":[{"start":0.000,"end":0.000,"text":"ລາວ"}]}. '
-              'Use Lao script only, include every spoken word in order, and use precise seconds.')
+              'Write every spoken number using Arabic digits, never number words: ສິບຫ້າ -> 15, ສອງພັນຊາວຫົກ -> 2026, ສາມຈຸດຫ້າ -> 3.5. '
+              'Keep English product, model, company, and brand names in their standard English spelling: iPhone, MacBook, CapCut, Samsung, Facebook. '
+              'Preserve all other speech in Lao, include every spoken word in order, and use precise seconds.')
     payload = {"contents":[{"parts":[{"text":prompt},{"inlineData":{"mimeType":"audio/mpeg","data":base64.b64encode(Path(audio).read_bytes()).decode("ascii")}}]}], "generationConfig":{"responseMimeType":"application/json","temperature":0}}
     failures = []
     for model in ids:
@@ -1652,7 +1773,7 @@ def gemini_prompted_word_times(audio, api_key, selected_model):
             decoded = json.loads(re.search(r"\{[\s\S]*\}", raw).group(0))
             words = []
             for item in decoded.get("words", []):
-                text = "".join(char for char in str(item.get("text", "")) if "\u0e80" <= char <= "\u0eff")
+                text = normalize_mixed_transcript(transcript_token(item.get("text", "")))
                 start, end = float(item.get("start", 0)), float(item.get("end", 0))
                 if text and end > start: words.append({"start":start, "end":end, "text":text})
             if words: return words
@@ -1660,6 +1781,64 @@ def gemini_prompted_word_times(audio, api_key, selected_model):
         except Exception as exc:
             failures.append(f"{model}: {str(exc)[:100]}")
     raise RuntimeError("Gemini fallback ບໍ່ສຳເລັດ: " + " | ".join(failures[-2:]))
+
+def gemini_chunked_word_times(wav_path, api_key, selected_model, audio_duration, chunk_seconds=18.0, overlap=.75):
+    """Transcribe two overlapping windows concurrently and deduplicate joins."""
+    if selected_model and selected_model != "auto":
+        model_ids = [selected_model]
+    else:
+        model_ids = [str(item.get("id", "")) for item in gemini_models(api_key) if item.get("id")]
+    if not model_ids:
+        raise RuntimeError("API key ນີ້ບໍ່ມີ Gemini model ທີ່ໃຊ້ໄດ້.")
+    step = max(5.0, chunk_seconds - overlap)
+    windows = []
+    offset = 0.0
+    while offset < audio_duration - .01:
+        windows.append((offset, min(chunk_seconds, audio_duration - offset)))
+        offset += step
+
+    def transcribe_window(window):
+        offset, length = window
+        chunk_wav = WORK / f"jodsub-chunk-{uuid.uuid4().hex}.wav"
+        chunk_mp3 = WORK / f"jodsub-chunk-{uuid.uuid4().hex}.mp3"
+        try:
+            subprocess.run([ffmpeg(), "-y", "-ss", f"{offset:.6f}", "-t", f"{length:.6f}", "-i", str(wav_path), "-vn", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(chunk_wav)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            subprocess.run([ffmpeg(), "-y", "-i", str(chunk_wav), "-c:a", "libmp3lame", "-b:a", "24k", str(chunk_mp3)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            words = gemini_prompted_word_times(chunk_mp3, api_key, selected_model, model_ids)
+            reported_end = max((float(item["end"]) for item in words), default=0.0)
+            # Each window has an exact known duration.  A provider clock that
+            # runs past only this small window can be safely normalized before
+            # the local Lao acoustic aligner refines individual word edges.
+            scale = min(1.0, length / reported_end) if reported_end > 0 else 1.0
+            output = []
+            for item in words:
+                start = offset + max(0.0, float(item["start"]) * scale)
+                end = offset + min(length, float(item["end"]) * scale)
+                if end > start:
+                    output.append({"start":round(start, 6), "end":round(end, 6), "text":str(item["text"])})
+            return output
+        finally:
+            chunk_wav.unlink(missing_ok=True)
+            chunk_mp3.unlink(missing_ok=True)
+
+    completed = []
+    with ThreadPoolExecutor(max_workers=min(2, len(windows))) as pool:
+        futures = {pool.submit(transcribe_window, window): window for window in windows}
+        for number, future in enumerate(as_completed(futures), 1):
+            completed.extend(future.result())
+            STATUS.update({"message":f"ກຳລັງຖອດສຽງໂໝດໄວ {number}/{len(windows)} ຊ່ວງ…", "progress":min(82, 65 + int(17 * number / max(1, len(windows))))})
+
+    combined = []
+    for item in sorted(completed, key=lambda row:(float(row["start"]), float(row["end"]))):
+        duplicate = next((old for old in reversed(combined[-8:]) if old["text"].casefold() == item["text"].casefold() and abs(float(old["start"]) - float(item["start"])) <= overlap + .45), None)
+        if duplicate:
+            duplicate["start"] = min(float(duplicate["start"]), float(item["start"]))
+            duplicate["end"] = max(float(duplicate["end"]), float(item["end"]))
+            continue
+        combined.append(item)
+    if not combined:
+        raise RuntimeError("ຖອດສຽງແບບແບ່ງຊ່ວງບໍ່ໄດ້ຄຳກັບມາ.")
+    return combined
 
 def gemini_audio_captions(video, api_key, words_per_caption, selected_model):
     """Direct JodSub -> Gemini native transcription with validated word timing."""
@@ -1674,7 +1853,7 @@ def gemini_audio_captions(video, api_key, words_per_caption, selected_model):
         subprocess.run([ffmpeg(), "-y", "-i", str(wav), "-c:a", "libmp3lame", "-b:a", "24k", str(audio)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         if audio.stat().st_size > 18 * 1024 * 1024:
             raise RuntimeError("ສຽງຍາວເກີນ 18 MB ສຳລັບການສົ່ງກົງ. ຕັດວິດີໂອເປັນສ່ວນກ່ອນ.")
-        STATUS.update({"message":"ກຳລັງຖອດສຽງດ້ວຍ Gemini 3.5 Transcribe ແບບ word-level (55%)", "progress":55})
+        STATUS.update({"message":"ກຳລັງຖອດສຽງດ້ວຍ Gemini native word-level (55%)", "progress":55})
         native_timing = True
         try:
             clean_words = gemini_native_word_times(audio, api_key)
@@ -1703,7 +1882,7 @@ def gemini_audio_captions(video, api_key, words_per_caption, selected_model):
             if clean_words[index]["start"] < clean_words[index - 1]["end"]:
                 clean_words[index]["start"] = clean_words[index - 1]["end"]
                 clean_words[index]["end"] = max(clean_words[index]["start"] + .012, clean_words[index]["end"])
-        captions = [{"start":group[0]["start"], "end":group[-1]["end"], "text":"".join(item["text"] for item in group), "words":copy.deepcopy(group)} for index in range(0, len(clean_words), max(2, min(5, int(words_per_caption)))) for group in [clean_words[index:index + max(2, min(5, int(words_per_caption)))]]]
+        captions = [{"start":group[0]["start"], "end":group[-1]["end"], "text":join_caption_words(group), "words":copy.deepcopy(group)} for index in range(0, len(clean_words), max(2, min(5, int(words_per_caption)))) for group in [clean_words[index:index + max(2, min(5, int(words_per_caption)))]]]
         STATUS.update({"message":"ກຳລັງຈັບຂອບ subtitle ຈາກ word timestamps ຈິງ (88%)", "progress":88})
         captions = snap_caption_edges(wav, captions)
         return format_captions(captions, words_per_caption)
@@ -1832,11 +2011,12 @@ def ai_job(project_id, action, payload):
             # older clients omitted the field and were accidentally routed to
             # Groq even though their visible field and key were Gemini.
             engine = str(payload.get("engine") or "gemini").strip().lower()
+            transcription_input = project.get("files", {}).get("transcription_audio") or project["files"]["video"]
             if engine == "karnsub":
                 # Older UI builds call the field apiKey.  Accept it as the
                 # Groq key so an update does not silently route to Gemini.
                 try:
-                    captions = groq_audio_captions(project["files"]["video"], payload.get("groqApiKey", "") or payload.get("apiKey", ""), int(payload.get("words", 3)))
+                    captions = groq_audio_captions(transcription_input, payload.get("groqApiKey", "") or payload.get("apiKey", ""), int(payload.get("words", 3)))
                 except RuntimeError as exc:
                     # Groq is the primary KarnSub pass.  If Whisper returns
                     # no Lao-script words (usually Thai/Latin for mixed
@@ -1845,9 +2025,9 @@ def ai_job(project_id, action, payload):
                     if "ສົ່ງອັກສອນ" not in str(exc) or not str(payload.get("geminiApiKey", "")).strip():
                         raise
                     STATUS.update({"message":"KarnSub ສົ່ງອັກສອນບໍ່ແມ່ນລາວ — ກຳລັງໃຊ້ Gemini Lao fallback (55%)", "progress":55})
-                    captions = gemini_audio_captions(project["files"]["video"], payload.get("geminiApiKey", "").strip(), int(payload.get("words", 3)), payload.get("model", "auto"))
+                    captions = gemini_audio_captions(transcription_input, payload.get("geminiApiKey", "").strip(), int(payload.get("words", 3)), payload.get("model", "auto"))
             elif engine == "gemini":
-                captions = gemini_audio_captions(project["files"]["video"], payload.get("apiKey", ""), int(payload.get("words", 3)), payload.get("model", "auto"))
+                captions = gemini_audio_captions(transcription_input, payload.get("apiKey", ""), int(payload.get("words", 3)), payload.get("model", "auto"))
             else:
                 raise RuntimeError(f"ບໍ່ຮູ້ຈັກ transcription engine: {engine}")
             # Both engines already return provider word timestamps and apply
@@ -1921,7 +2101,7 @@ def ai_job(project_id, action, payload):
                 # Existing events may carry the pre-calibration clock.  Build
                 # them from the corrected captions instead of reusing stale
                 # positions outside the video.
-                project["sfx_events"] = sfx_events(captions, requested_sfx, project_id)
+                project["sfx_events"] = sfx_events_with_edges(captions, requested_sfx, project_id, project.get("config", {}))
             srt = EXPORTS / f"{clean(project['name'])}.srt"; write_srt(project["captions"], srt); project["srt_file"] = srt.name
             clock_note = f" ແກ້ clock ເປັນ {scale * 100:.2f}% ຕາມຄວາມຍາວສຽງ." if scale != 1.0 else ""
             message = f"ຈັບເວລາ subtitle ຄືນໃໝ່ສຳເລັດ {len(captions)} ບັນທັດ.{clock_note}"
@@ -1943,8 +2123,10 @@ def ai_job(project_id, action, payload):
             srt = EXPORTS / f"{clean(project['name'])}.srt"; write_srt(project["captions"], srt); project["srt_file"] = srt.name
             message = f"ຈັດ subtitle ສຳເລັດ: ບໍ່ເກີນ {int(payload.get('words', 3))} ຄຳຕໍ່ບັນທັດ."
         elif action == "sfx":
-            project["sfx_events"] = sfx_events(project.get("captions", []), payload.get("count", 0), project_id)
-            message = f"ຈັດ SFX ອັດຕະໂນມັດ {len(project['sfx_events'])} ສຽງແລ້ວ."
+            requested = max(0, min(20, int(payload.get("count", 0))))
+            project.setdefault("config", {})["sfxCount"] = requested
+            project["sfx_events"] = sfx_events_with_edges(project.get("captions", []), requested, project_id, project.get("config", {}))
+            message = f"ຈັດ SFX ອັດຕະໂນມັດ {requested} ສຽງ + SFX ເປີດ/ປິດ {len(project['sfx_events']) - requested} ສຽງແລ້ວ."
         else: raise RuntimeError("ຄຳສັ່ງ AI ບໍ່ຖືກຮອງຮັບ.")
         project["updated"] = time.time(); save_project(project)
         STATUS = {"state":"done", "message":message, "progress":100, "files":[project["srt_file"]] if action in ("transcribe", "diarize", "realign", "format") else []}
@@ -2437,10 +2619,13 @@ def apply_timeline_edge_animations(data, video_material_id, entry_animation, exi
         applied.append((direction, material["id"]))
     return applied
 
+def capcut_is_running():
+    return subprocess.run(["pgrep", "-x", "CapCut"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
 def handoff_capcut(project_id, capcut_id):
     global STATUS
     try:
-        if subprocess.run(["pgrep", "-x", "CapCut"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+        if capcut_is_running():
             raise RuntimeError("ກະລຸນາປິດ CapCut ກ່ອນ. JodSub ຈະບໍ່ຂຽນທັບໃນຂະນະທີ່ CapCut ເປີດຢູ່.")
         source, source_draft = capcut_draft_from_id(capcut_id)
         project = load_project(project_id)
@@ -2459,7 +2644,7 @@ def handoff_capcut(project_id, capcut_id):
         if requested_sfx:
             # Always derive SFX positions from the current caption clock.  A
             # project may have been re-aligned since its previous SFX pass.
-            project["sfx_events"] = sfx_events(project["captions"], requested_sfx, project_id)
+            project["sfx_events"] = sfx_events_with_edges(project["captions"], requested_sfx, project_id, project["config"])
         # Projects saved before this version may reference variable-length SFX.
         for event in project.get("sfx_events", []):
             source_sfx = Path(event.get("file", ""))
@@ -2563,7 +2748,7 @@ def handoff_capcut(project_id, capcut_id):
         if not capcut_captions:
             raise RuntimeError("subtitle ຢູ່ນອກຂອບເວລາຂອງ video ໃນ CapCut.")
         # SFX must use the same final, bounded clock as the copied subtitles.
-        capcut_sfx_events = sfx_events(capcut_captions, requested_sfx, project_id) if requested_sfx else []
+        capcut_sfx_events = sfx_events_with_edges(capcut_captions, requested_sfx, project_id, project["config"], primary_timeline_end / 1000000.0)
         cut = None
         if enabled_config_flag(project["config"].get("deadAir", False)):
             STATUS.update({"message":"ກຳລັງວິເຄາະ Dead Air ແລະຕັດເປັນ shot…", "progress":35})
@@ -2571,7 +2756,7 @@ def handoff_capcut(project_id, capcut_id):
             if cut:
                 capcut_captions = captions_after_cuts(project["captions"], cut)
                 if not capcut_captions: raise RuntimeError("Dead Air cut ຈະຕັດ subtitle ອອກທັງໝົດ; ບໍ່ໄດ້ສ້າງ copy.")
-                capcut_sfx_events = sfx_events(capcut_captions, requested_sfx, project_id) if requested_sfx else []
+                capcut_sfx_events = sfx_events_with_edges(capcut_captions, requested_sfx, project_id, project["config"], capcut_video_timeline_end(data) / 1000000.0)
                 cut_srt = EXPORTS / f"{clean(project['name'])}-capcut-cut.srt"; write_srt(capcut_captions, cut_srt); handoff_srt = cut_srt.name
         # Recompute the actual destination video end after optional cuts and
         # validate coverage against that end.  This is deliberately before any
@@ -2715,6 +2900,42 @@ def handoff_capcut(project_id, capcut_id):
     except Exception as exc:
         STATUS = {"state":"error", "message":f"CapCut handoff ບໍ່ສຳເລັດ: {str(exc)[:600]}", "progress":0, "files":[]}
 
+def handoff_capcut_auto(project_id, capcut_id):
+    """Gracefully close CapCut, generate Timeline 2, then relaunch it."""
+    global STATUS
+    was_running = capcut_is_running()
+    closed = not was_running
+    try:
+        if was_running:
+            STATUS = {"state":"working", "message":"ກຳລັງໃຫ້ CapCut ບັນທຶກແລະປິດ… ຖ້າມີໜ້າຕ່າງ Save ກະລຸນາເລືອກ Save.", "progress":5, "files":[]}
+            result = subprocess.run(["osascript", "-e", 'tell application "CapCut" to quit'], capture_output=True, text=True, timeout=15)
+            if result.returncode:
+                detail = (result.stderr or result.stdout).strip()[:180]
+                # AppleScript returns -128 when CapCut (or its Save dialog) was
+                # cancelled.  If the app has actually exited, continue safely;
+                # only abort when CapCut is still running and the project may be
+                # unsaved.
+                if capcut_is_running():
+                    raise RuntimeError(f"ສັ່ງ CapCut ປິດບໍ່ສຳເລັດ: {detail or 'ກົດ Save ໃນ CapCut ແລ້ວລອງ Auto Handoff ໃໝ່.'}")
+            deadline = time.time() + 120
+            while capcut_is_running() and time.time() < deadline:
+                STATUS.update({"message":f"ກຳລັງລໍຖ້າ CapCut ປິດ/Save… ({max(0, int(deadline - time.time()))}s)", "progress":7})
+                time.sleep(1)
+            if capcut_is_running():
+                raise RuntimeError("CapCut ຍັງບໍ່ປິດ. ກວດໜ້າຕ່າງ Save ຂອງ CapCut ແລ້ວລອງໃໝ່.")
+            closed = True
+        STATUS = {"state":"working", "message":"CapCut ປິດແລ້ວ — ກຳລັງສ້າງ Timeline 2…", "progress":10, "files":[]}
+        handoff_capcut(project_id, capcut_id)
+    except Exception as exc:
+        STATUS = {"state":"error", "message":f"CapCut Auto Handoff ບໍ່ສຳເລັດ: {str(exc)[:500]}", "progress":0, "files":[]}
+    finally:
+        if was_running and closed:
+            try:
+                subprocess.run(["open", "-a", "CapCut"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                if STATUS.get("state") == "done": STATUS["message"] += " ເປີດ CapCut ຄືນແລ້ວ."
+            except Exception:
+                if STATUS.get("state") == "done": STATUS["message"] += " ກະລຸນາເປີດ CapCut ຄືນເອງ."
+
 def render(project_id):
     global STATUS
     project = load_project(project_id); STATUS = {"state":"working","message":"ກຳລັງ render video…","progress":15,"files":[]}
@@ -2739,7 +2960,8 @@ def render(project_id):
             command += ["-stream_loop", "-1", "-i", music]
         sfx = project["files"].get("sfx")
         if sfx: command += ["-i", sfx]
-        automatic_sfx = [event for event in project.get("sfx_events", []) if Path(event.get("file", "")).is_file()]
+        render_end = (end - start) if end > start else media_duration(source) / 1000000.0
+        automatic_sfx = [event for event in sfx_events_with_edges(captions, config.get("sfxCount", 0), project_id, config, render_end) if Path(event.get("file", "")).is_file()]
         for event in automatic_sfx: command += ["-i", event["file"]]
         ass_filter = str(ass).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
         filters, video_label = [f"[0:v]ass='{ass_filter}'[sub]"], "[sub]"
@@ -2781,6 +3003,17 @@ class App(SimpleHTTPRequestHandler):
         self.send_response(code); self.send_header("Content-Type", "application/json; charset=utf-8"); self.end_headers(); self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
     def do_GET(self):
         if self.path == "/api/status": return self.json(STATUS)
+        if self.path == "/api/dependencies":
+            try:
+                ffmpeg_path = str(ffmpeg())
+                ffmpeg_ready = bool(ffmpeg_path and Path(ffmpeg_path).is_file())
+            except Exception:
+                ffmpeg_path, ffmpeg_ready = "", False
+            return self.json({
+                "ffmpeg": {"ready": ffmpeg_ready, "path": ffmpeg_path},
+                "laoModel": {"ready": lao_model_ready(), "path": str(LAO_AUDITOR_DIR)},
+                "gemini": {"ready": False, "required": "Gemini API key"},
+            })
         if self.path == "/api/lao-model": return self.json({"ready":lao_model_ready(), "path":str(LAO_AUDITOR_DIR)})
         if self.path == "/api/precision-model":
             size = OPENAI_WHISPER_V3_FILE.stat().st_size if OPENAI_WHISPER_V3_FILE.is_file() else 0
@@ -2833,6 +3066,11 @@ class App(SimpleHTTPRequestHandler):
             if STATUS["state"] == "working": return self.json({"error":"busy"},409)
             if not project_id or not project_path(project_id).exists(): return self.json({"error":"project not found"},404)
             threading.Thread(target=handoff_capcut,args=(project_id,payload.get("capcutId", "")),daemon=True).start(); return self.json({"ok":True},202)
+        if self.path == "/api/capcut-auto":
+            length = int(self.headers.get("Content-Length", 0)); payload = json.loads(self.rfile.read(length)); project_id = payload.get("id")
+            if STATUS["state"] == "working": return self.json({"error":"busy"},409)
+            if not project_id or not project_path(project_id).exists(): return self.json({"error":"project not found"},404)
+            threading.Thread(target=handoff_capcut_auto,args=(project_id,payload.get("capcutId", "")),daemon=True).start(); return self.json({"ok":True},202)
         if self.path == "/api/editing-style":
             if STATUS["state"] == "working": return self.json({"error":"busy"},409)
             try:
@@ -2900,9 +3138,42 @@ class App(SimpleHTTPRequestHandler):
                 target = directory / clean(item.filename)
                 with target.open("wb") as output: shutil.copyfileobj(item.file, output)
                 files[field] = str(target)
+        # Use CapCut's local source media directly when no upload is chosen.
         if not files.get("video"):
-            STATUS = {"state":"error", "message":"ກະລຸນາເລືອກ video ກ່ອນບັນທຶກ.", "progress":0, "files":[]}
-            return self.json({"error":"ຕ້ອງເລືອກ video"},400)
+            capcut_id = str(data.get("config", {}).get("capcutProjectId", "")).strip()
+            if capcut_id:
+                try:
+                    _, draft_path = capcut_draft_from_id(capcut_id)
+                    draft_data = json.loads(draft_path.read_text(encoding="utf-8"))
+                    candidates = [item.get("path") for item in draft_data.get("materials", {}).get("videos", []) if item.get("path")]
+                    source = next((Path(path) for path in candidates if Path(path).is_file()), None)
+                    if source: files["video"] = str(source)
+                    timeline_audio = directory / "capcut-timeline-audio.wav"
+                    capcut_timeline_audio(draft_data, timeline_audio)
+                    files["transcription_audio"] = str(timeline_audio)
+                except (OSError, ValueError, TypeError, json.JSONDecodeError, RuntimeError) as exc:
+                    # Never silently fall back to the full source movie: that
+                    # would transcribe minutes of unused material while the
+                    # selected CapCut timeline may only be a few seconds.
+                    files.pop("video", None)
+                    STATUS = {"state":"error", "message":f"ສ້າງສຽງຈາກ Timeline 1 ບໍ່ໄດ້: {str(exc)[:320]}. ກະລຸນາວາງວິດີໂອຕົ້ນສະບັບໄວ້ຕາມ path ໃນ CapCut ແລ້ວລອງໃໝ່.", "progress":0, "files":[]}
+                    return self.json({"error":STATUS["message"]},400)
+        # Existing projects may already have a cached source-video path.  A
+        # selected CapCut project must still override it with Timeline 1 audio.
+        capcut_id = str(data.get("config", {}).get("capcutProjectId", "")).strip()
+        if capcut_id and not files.get("transcription_audio"):
+            try:
+                _, draft_path = capcut_draft_from_id(capcut_id)
+                draft_data = json.loads(draft_path.read_text(encoding="utf-8"))
+                timeline_audio = directory / "capcut-timeline-audio.wav"
+                capcut_timeline_audio(draft_data, timeline_audio)
+                files["transcription_audio"] = str(timeline_audio)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError, RuntimeError) as exc:
+                STATUS = {"state":"error", "message":f"ສ້າງສຽງຈາກ Timeline 1 ບໍ່ໄດ້: {str(exc)[:320]}. ກະລຸນາວາງວິດີໂອຕົ້ນສະບັບໄວ້ຕາມ path ໃນ CapCut ແລ້ວລອງໃໝ່.", "progress":0, "files":[]}
+                return self.json({"error":STATUS["message"]},400)
+        if not files.get("video"):
+            STATUS = {"state":"error", "message":"ບໍ່ພົບວິດີໂອໃນ CapCut project; ເລືອກ project ຫຼື video ກ່ອນ.", "progress":0, "files":[]}
+            return self.json({"error":"ບໍ່ພົບ video ໃນ CapCut project ທີ່ເລືອກ"},400)
         data["updated"] = time.time(); save_project(data)
         STATUS = {"state":"done", "message":"ບັນທຶກ project ສຳເລັດແລ້ວ.", "progress":100, "files":[]}
         return self.json({"id":project_id,"project":data})

@@ -1,5 +1,20 @@
 <!doctype html>
 <script>
+window.setTimeout(async()=>{
+  try{
+    const d=await fetch('/api/dependencies').then(r=>r.json());
+    const missing=[];
+    if(!d.ffmpeg?.ready) missing.push('FFmpeg');
+    if(!d.laoModel?.ready) missing.push('Lao alignment model');
+    if(!missing.length)return;
+    const box=document.createElement('div');box.className='panel';box.id='dependency-warning';
+    box.innerHTML='<h2>ກວດເຄື່ອງບໍ່ຄົບ</h2><p class="hint">ຍັງຂາດ: '+missing.join(', ')+'</p>';
+    if(!d.laoModel?.ready){const b=document.createElement('button');b.type='button';b.textContent='Download Lao Model';b.onclick=async()=>{b.disabled=true;b.textContent='ກຳລັງດາວໂຫຼດ…';await fetch('/api/lao-model/download',{method:'POST'});b.textContent='ກຳລັງດາວໂຫຼດ — ເບິ່ງ Status';};box.appendChild(b)}
+    document.querySelector('header')?.after(box);
+  }catch(_){/* local server may still be starting */}
+},700);
+</script>
+<script>
 window.setTimeout(()=>{const panel=document.getElementById('auto-sfx')?.closest('.panel');if(!panel||document.getElementById('pixabay-key'))return;const box=document.createElement('div');box.className='panel';box.innerHTML='<label>Pixabay API key — ຮູບ/ວິດີໂອ B-roll</label><input id="pixabay-key" type="password" placeholder="ໃສ່ Pixabay API key"><label>Freesound API key — SFX Web</label><input id="freesound-key" type="password" placeholder="ໃສ່ Freesound API key"><div class="grid2"><input id="pixabay-query" placeholder="ຄຳຄົ້ນຫາ B-roll"><button id="pixabay-search" type="button" class="secondary">ຄົ້ນຫາ Pixabay</button></div><div id="pixabay-results" class="hint"></div>';panel.appendChild(box);for(const id of ['pixabay-key','freesound-key']){const e=document.getElementById(id),v=localStorage.getItem('jodsub-'+id);if(v)e.value=v;e.addEventListener('change',()=>localStorage.setItem('jodsub-'+id,e.value))}document.getElementById('pixabay-search').onclick=async()=>{const key=document.getElementById('pixabay-key').value.trim(),query=document.getElementById('pixabay-query').value.trim();if(!key||!query){message('ໃສ່ Pixabay key ແລະຄຳຄົ້ນຫາກ່ອນ.',0);return}try{const r=await post('/api/pixabay-search',{key,query});document.getElementById('pixabay-results').innerHTML=(r.results||[]).map(x=>`<p><a href="${x.url}" target="_blank">Pixabay #${x.id} — ${x.duration||0}s</a></p>`).join('')||'ບໍ່ພົບຜົນຄົ້ນຫາ'}catch(e){message(e.message,0)}}},700);
 </script>
 <script>
@@ -15,6 +30,58 @@ window.setTimeout(()=>{const panel=document.getElementById('editing-style'),summ
 // Keep JodSub focused on subtitle + CapCut handoff. Optional media/export
 // controls are intentionally removed from the workflow.
 document.addEventListener('DOMContentLoaded',()=>{
+  // Project/video import is no longer a user-facing step: CapCut project
+  // selection supplies the source. Keep its fields mounted for compatibility
+  // with save() and older projects, but remove the obsolete panel from UI.
+  const projectPanel=document.getElementById('name')?.closest('.panel');
+  if(projectPanel) projectPanel.style.display='none';
+  // AssemblyAI speaker mode is retired from the UI. Keep the endpoint for
+  // backwards compatibility, but do not expose or require its API key.
+  const assembly=document.getElementById('assembly-key');
+  const assemblyButton=document.getElementById('assembly-diarize');
+  if(assembly){assembly.style.display='none';assembly.previousElementSibling?.remove();}
+  if(assemblyButton){assemblyButton.style.display='none';}
+  setTimeout(()=>{
+    const projectPanelDelayed=document.getElementById('name')?.closest('.panel');
+    if(projectPanelDelayed) projectPanelDelayed.style.display='none';
+    const key=document.getElementById('assembly-key');
+    const button=document.getElementById('assembly-diarize');
+    if(key){key.style.display='none';key.previousElementSibling?.remove();}
+    if(button){button.style.display='none';}
+    // Retired CapCut styling controls: keep their ids for old saved projects,
+    // but remove the clutter from the handoff panel.
+    const adjustment=document.getElementById('adjustment');
+    if(adjustment){const grid=adjustment.closest('.grid2');grid?.remove();}
+    const projectSelect=document.getElementById('capcut-project');
+    if(projectSelect) projectSelect.onchange=null;
+    document.querySelectorAll('#capcut-project ~ .hint').forEach(node=>{
+      if(/Yours|Face preset|Animation/i.test(node.textContent)) node.remove();
+    });
+    const colors=document.querySelector('.jodsub-colors');
+    if(colors && !colors.previousElementSibling?.dataset?.colorHeading){
+      const heading=document.createElement('h2');
+      heading.textContent='ການເລືອກສີຕາມຄຳເວົ້າ';
+      heading.dataset.colorHeading='1';
+      colors.parentElement.insertBefore(heading, colors);
+      const mode=colors.querySelector('.jodsub-color-card h3');
+      if(mode) mode.textContent='ໂໝດສີ (ຂໍ້ຍ່ອຍ)';
+    }
+    if(colors){
+      const status=document.getElementById('status')?.closest('.panel');
+      const colorHeading=colors.parentElement.querySelector('h2[data-color-heading]');
+      if(status){
+        status.parentElement.insertBefore(colorHeading, status);
+        status.parentElement.insertBefore(colors, status);
+      }
+    }
+    const projectSelect=document.getElementById('capcut-project');
+    if(projectSelect && !projectSelect.previousElementSibling?.dataset?.projectHeading){
+      const heading=document.createElement('h2');
+      heading.textContent='ເລືອກ CapCut Project';
+      heading.dataset.projectHeading='1';
+      projectSelect.parentElement.insertBefore(heading, projectSelect.previousElementSibling);
+    }
+  },500);
   for(const id of ['music','broll']){
     const node=document.getElementById(id);
     if(node){if(node.previousElementSibling?.tagName==='LABEL')node.previousElementSibling.remove();node.remove();}
@@ -24,6 +91,12 @@ document.addEventListener('DOMContentLoaded',()=>{
     if(node)node.closest('.grid2 > div')?.remove();
   }
   document.getElementById('render')?.remove();
+  const order={'01 — PROJECT':1,'02 — GEMINI':2,'03 — SUBTITLE':3,'04 — SFX':4,'05 — CAPCUT':5,'06 — LEARN':6,'STATUS':99};
+  document.querySelectorAll('.panel').forEach(panel=>{
+    const step=panel.querySelector('.step')?.textContent?.trim()||'';
+    const key=Object.keys(order).find(prefix=>step.startsWith(prefix));
+    if(key) panel.style.order=order[key];
+  });
 });
     
 // Subtitle pipeline v2: one dedicated Gemini speech model.  This runs after
@@ -58,19 +131,23 @@ if (location.protocol === 'file:') location.replace('http://127.0.0.1:8877/');
 <style>
 :root{color-scheme:dark;--bg:#0a1020;--panel:#141e33;--edge:#2d4266;--cyan:#47d8e8;--muted:#b8c5dc}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#f8faff;font:14px -apple-system,BlinkMacSystemFont,"Noto Sans Lao",sans-serif}.app{max-width:1440px;margin:auto;padding:12px 16px 20px}header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;padding:10px 12px;border-bottom:1px solid var(--edge)}h1,h2{margin:0}h1{font-size:26px}h2{font-size:17px}.lead,.hint{color:var(--muted);line-height:1.35}.lead{margin:2px 0;font-size:12px}.hint{font-size:11px;margin:6px 0}.badge{border:1px solid #4c6b9d;background:#152842;padding:5px 8px;border-radius:7px;color:#a9dbff;font-size:11px;white-space:nowrap}.layout{display:grid;grid-template-columns:300px minmax(0,1fr);gap:10px;align-items:start}.stack{display:grid;gap:10px}.panel{background:var(--panel);border:1px solid var(--edge);border-radius:9px;padding:12px}.step{color:var(--cyan);font-weight:800;font-size:11px;letter-spacing:.06em;margin-bottom:4px}.grid2,.grid3{display:grid;gap:7px}.grid2{grid-template-columns:1fr 1fr}.grid3{grid-template-columns:repeat(3,1fr)}label{display:block;font-weight:700;margin:8px 0 4px}input,select,textarea,button{font:inherit;color:inherit;width:100%;border-radius:6px;border:1px solid var(--edge);background:#0a1323;padding:8px}textarea{min-height:220px;resize:vertical;line-height:1.45}button{cursor:pointer;border:0;background:linear-gradient(90deg,#8063ff,#a270ff);font-weight:800;margin-top:8px}button.secondary{background:#263a5a;border:1px solid #395477}.toggle{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:8px 0 3px}.toggle button{margin:0;background:#263a5a;border:1px solid #395477;text-align:left}.toggle button.active{background:linear-gradient(90deg,#8063ff,#a270ff);border-color:transparent}.tools{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.tools button{margin:0;text-align:center}.status{white-space:pre-wrap;background:#091321;border:1px solid #263957;border-radius:7px;padding:10px;margin-top:8px;min-height:42px}.progress{height:7px;border-radius:99px;background:#324462;margin-top:7px;overflow:hidden}.progress i{display:block;background:linear-gradient(90deg,#8b6cff,#47d8e8);height:100%;width:0;transition:.35s}a{color:#9dcbff}@media(max-width:900px){.layout{grid-template-columns:1fr}.grid2,.grid3,.toggle{grid-template-columns:1fr 1fr}.app{padding:10px}}@media(max-width:560px){.grid2,.grid3,.toggle,.tools{grid-template-columns:1fr}.app{padding:8px}header{align-items:flex-start;flex-direction:column}}
 .app{max-width:1500px}.layout{grid-template-columns:285px minmax(0,1fr);gap:8px}.stack{gap:8px}.panel{padding:10px;border-radius:8px}label{margin:6px 0 3px}input,select,textarea,button{padding:7px}.tools{grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:5px}.toggle{gap:5px;margin:6px 0 2px}textarea{min-height:210px}.status{margin-top:6px;padding:9px;min-height:38px}.progress{margin-top:6px}.hint{margin:4px 0}.step{margin-bottom:3px}button{margin-top:7px}@media(min-width:1200px){.layout{grid-template-columns:280px minmax(0,1fr)}textarea{min-height:235px}}@media(max-width:900px){.layout{gap:8px}.panel{padding:10px}}
+.layout{grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:stretch}.layout>.stack{display:contents}.layout>.stack>.panel{height:100%}.layout>.stack>.panel:last-child{grid-column:1/-1}
+.layout>.stack>.panel{height:auto!important;min-height:0;align-self:start}.jodsub-colors{align-items:start}.jodsub-color-card{height:auto}
+.app{max-width:none;width:100%;min-height:100vh;padding-left:24px;padding-right:24px}.layout{width:100%;grid-template-columns:1fr;grid-auto-flow:row}.layout>.stack>.panel{grid-column:1!important}
+@media(max-width:900px){.layout{grid-template-columns:1fr}.layout>.stack>.panel:last-child{grid-column:auto}}
 </style><body><main class="app"><header><div><h1>JodSub</h1><p class="lead">ຖອດສຽງລາວ • ແປ subtitle • SFX ອັດຕະໂນມັດ • CapCut ແບບແກ້ໄຂໄດ້</p></div><span class="badge" id="sfx-badge">SFX ກຳລັງກວດ…</span></header>
 <div class="layout"><aside class="stack"><section class="panel"><div class="step">01 — PROJECT</div><h2>ເລີ່ມ Project</h2><label>ຊື່ project</label><input id="name" value="JodSub Project"><label>ວິດີໂອຕົ້ນສະບັບ</label><input id="video" type="file" accept="video/*"><label>ນຳ SRT ເຂົ້າ (ຖ້າມີ)</label><input id="srt" type="file" accept=".srt,text/plain"><button class="secondary" id="read-srt" type="button">ເປີດ SRT ເຂົ້າ Editor</button><button id="save" type="button">ບັນທຶກ project</button><p class="hint">ວິດີໂອຕົ້ນສະບັບບໍ່ຖືກປ່ຽນແປງ.</p></section>
 <section class="panel"><div class="step">02 — GEMINI DIRECT</div><h2>ຖອດສຽງ ແລະ ແປ</h2><label>Gemini API key (ບໍ່ບັນທຶກ)</label><input id="api-key" type="password" autocomplete="off" placeholder="ໃສ່ API key ຂອງ Gemini"><div class="grid2"><div><label>ຮູບແບບ Gemini</label><select id="model"><option value="auto">Auto — ສະຫຼັບ model ເມື່ອເຕັມ</option></select><button class="secondary" id="refresh-models" type="button">ໂຫຼດທຸກ model ຂອງ key</button></div><div><label>ຄຳ/1 subtitle</label><select id="words"><option>2</option><option selected>3</option><option>4</option><option>5</option></select></div></div><div class="tools" style="margin-top:12px"><button id="ai-transcribe" type="button">✦ ຖອດສຽງຜ່ານ Gemini</button><button id="ai-translate" type="button">文 ແປ subtitle</button></div><label>ພາສາທີ່ຈະແປ</label><select id="language"><option>Thai</option><option>English</option><option>Lao</option></select><p class="hint">JodSub ສົ່ງສຽງໄປ Gemini ໂດຍກົງ ແລະບໍ່ຂື້ນກັບແອັບອື່ນ.</p></section></aside>
 <section class="stack"><section class="panel"><div class="step">03 — SUBTITLE</div><h2>ກວດ ແລະ ແກ້ຂໍ້ຄວາມ</h2><p class="hint">1 ແຖວ = ເວລາເລີ່ມ|ເວລາຈົບ|ຂໍ້ຄວາມ. ເວລາໃຊ້ວິນາທີ.</p><textarea id="captions">0|2|ສະບາຍດີ
 2|4|ຍິນດີຕ້ອນຮັບ</textarea><div class="tools"><button class="secondary" type="button" id="add-caption">＋ ເພີ່ມ subtitle</button><button class="secondary" type="button" id="normalize">↔ ຈັດໃຫ້ 3/4/5 ຄຳຕໍ່ບັນທັດ</button><button class="secondary" type="button" id="realign">⌖ ຈັບເວລາຈາກສຽງຄືນໃໝ່</button></div></section>
-<section class="panel"><div class="step">04 — SFX</div><div class="grid2"><div><label>ຈຳນວນ SFX ອັດຕະໂນມັດ</label><select id="sfx-count"><option value="0">ບໍ່ໃສ່</option><option value="10">10 ສຽງ</option><option value="15">15 ສຽງ</option><option value="20">20 ສຽງ</option></select></div><div><label>ການໃສ່ SFX</label><button id="auto-sfx" type="button">ວິເຄາະ subtitle ແລະ ຈັດ SFX</button></div></div><p class="hint">ນຳເຂົ້າ SFX ທັງໝົດຈາກ KarnSub ໃນເຄື່ອງ: correct, cash register, ding, whoosh, camera shutter, vine boom ແລະອື່ນໆ. ອັດຕະໂນມັດຈະເລືອກຕາມຄວາມໝາຍ ແລະໃສ່ສະເພາະຈຸດເດັ່ນ.</p></section>
+<section class="panel"><div class="step">04 — SFX</div><div class="grid2"><div><label>ຈຳນວນ SFX ອັດຕະໂນມັດ</label><select id="sfx-count"><option value="0">ບໍ່ໃສ່</option><option value="10">10 ສຽງ</option><option value="15">15 ສຽງ</option><option value="20">20 ສຽງ</option></select></div><div><label>ການໃສ່ SFX</label><button id="auto-sfx" type="button">ວິເຄາະ subtitle ແລະ ຈັດ SFX</button></div><div><label>SFX ຕອນເປີດຄລິບ</label><select id="opening-sfx"><option value="click">Click</option><option value="zoom">Zoom / Whoosh</option><option value="none">ບໍ່ໃສ່</option></select></div><div><label>SFX ຕອນປິດຄລິບ</label><select id="closing-sfx"><option value="zoom">Zoom / Whoosh</option><option value="click">Click</option><option value="none">ບໍ່ໃສ່</option></select></div></div><p class="hint">SFX ເປີດຈະຢູ່ທີ່ 0:00 ແລະ SFX ປິດຈະຈົບພ້ອມວິດີໂອ. ສຽງທັງສອງແຍກຈາກຈຳນວນ SFX ອັດຕະໂນມັດ.</p></section>
 <section class="panel"><div class="step">05 — CAPCUT HANDOFF</div><h2>ສົ່ງເປັນສຳເນົາ CapCut</h2><p class="hint">ສ້າງ project ໃໝ່ຈາກ project ທີ່ເລືອກ. Subtitle, SFX ແລະ shot ຢູ່ເປັນ layer ແກ້ໄຂໄດ້. ປິດ CapCut ກ່ອນກົດສົ່ງ.</p><label>ໂໝດ Dead Air</label><div class="toggle"><button id="dead-air-off" class="active" type="button">ປິດ — ໃຊ້ຄລິບທີ່ຕັດເອງ</button><button id="dead-air-on" type="button">ເປີດ — ໃຫ້ JodSub ຕັດ</button></div><input id="dead-air" type="hidden" value="false"><p id="dead-air-help" class="hint">ເລືອກວິດີໂອທີ່ທ່ານຕັດແລ້ວໃນສ່ວນ 01. JodSub ຈະໃສ່ subtitle ແລະ SFX ເທົ່ານັ້ນ.</p><div id="dead-air-settings" class="grid2" hidden><div><label>ຊ່ອງງຽບຕ່ຳສຸດ (ວິນາທີ)</label><input id="dead-air-gap" type="number" value="0.55" min="0.3" max="3" step="0.05"></div><div><label>ເວລາສຳຮອງຮອບຄຳ (ວິນາທີ)</label><input id="dead-air-padding" type="number" value="0.09" min="0.03" max="0.3" step="0.01"></div></div><label>CapCut project ຕົ້ນແບບ (ຕ້ອງມີ Text ຢ່າງໜ້ອຍ 1 ອັນ)</label><select id="capcut-project"><option value="">ກຳລັງໂຫຼດ…</option></select><div class="grid2"><div><label>Adjustment — Yours ຈາກ CapCut</label><select id="adjustment"><option value="inherit">ບໍ່ໃຊ້ Adjustment</option></select></div><div><label>Retouch — Face preset ຈາກ CapCut</label><select id="retouch"><option value="inherit">ບໍ່ໃຊ້ Retouch</option></select></div><div><label>Animation ເຂົ້າ (shot ວິດີໂອທຳອິດ)</label><select id="entry-animation"><option value="">ບໍ່ໃຊ້</option></select></div><div><label>Animation ອອກ (shot ວິດີໂອສຸດທ້າຍ)</label><select id="exit-animation"><option value="">ບໍ່ໃຊ້</option></select></div></div><p class="hint">Yours ແລະ Face preset ຖືກອ່ານຈາກບ່ອນເກັບ preset ຂອງ CapCut ໂດຍກົງ. Animation ອ່ານຈາກ animation ທີ່ບັນທຶກ/ດາວໂຫຼດໃນ CapCut ແລະໃສ່ໃນ shot ຂອບ timeline ເທົ່ານັ້ນ.</p><button id="capcut" type="button">ສ້າງສຳເນົາໄປ CapCut</button></section>
 <section class="panel" id="editing-style"><div class="step">06 — LEARN MY EDITING STYLE</div><h2>ຮຽນຮູ້ສະໄຕລ໌ການຕັດ</h2><p class="hint">ເລືອກ CapCut project ທີ່ຕັດແລ້ວ. JodSub ຈະອ່ານ source video ແລະ timeline ເພື່ອວັດການຕັດແບບບໍ່ແກ້ໄຂໄຟລ໌. ນຳ subtitle ທັງສອງເຂົ້າເມື່ອຕ້ອງການຮຽນຄຳທີ່ຖືກຕັດ.</p><label>CapCut reference project</label><select id="style-capcut"><option value="">ກຳລັງໂຫຼດ…</option></select><div class="grid2"><div><label>Subtitle ຕົ້ນສະບັບ (SRT/VTT/ASS)</label><input id="style-original-subtitle" type="file" accept=".srt,.vtt,.ass,text/plain"></div><div><label>Subtitle ຫຼັງຕັດ (SRT/VTT/ASS)</label><input id="style-edited-subtitle" type="file" accept=".srt,.vtt,.ass,text/plain"></div></div><button id="style-analyze" type="button">ວິເຄາະ Editing Style</button><div id="style-summary" class="status">ຍັງບໍ່ມີ Editing Profile.</div></section>
 <section class="panel"><div class="step">STATUS</div><h2>ສະຖານະການເຮັດວຽກ</h2><div id="status" class="status">ບັນທຶກ project ກ່ອນ ແລ້ວເລືອກຂັ້ນຕອນ.</div><div class="progress"><i id="bar"></i></div><div id="files"></div></section></section></div></main>
 <script>
 const $=id=>document.getElementById(id);let projectId='';
 function parseCaptions(){return $('captions').value.split('\n').filter(Boolean).map((line,i)=>{const [start,end,...text]=line.split('|');if(!text.length||!Number.isFinite(+start)||!Number.isFinite(+end)||+end<=+start)throw Error('subtitle ແຖວ '+(i+1)+' ບໍ່ຖືກ');return {start:+start,end:+end,text:text.join('|').trim()}}).filter(x=>x.text)}
-function getConfig(){return {wordsPerCaption:$('words').value,sfxCount:$('sfx-count').value,deadAir:$('dead-air').value==='true',deadAirGap:$('dead-air-gap').value,deadAirPadding:$('dead-air-padding').value,useEditingStyle:$('use-editing-style')?.checked||false,adjustment:$('adjustment').value,retouch:$('retouch').value,entryAnimation:$('entry-animation').value,exitAnimation:$('exit-animation').value,karaokeMode:$('karaoke-mode')?.value||'highlight',subtitleColor:$('subtitle-color')?.value||'#FFD400',speakerColor1:$('speaker-color-1')?.value||'#FFFFFF',speakerColor2:$('speaker-color-2')?.value||'#FFD400'}}
+function getConfig(){return {wordsPerCaption:$('words').value,sfxCount:$('sfx-count').value,openingSfx:$('opening-sfx').value,closingSfx:$('closing-sfx').value,capcutProjectId:$('capcut-project')?.value||'',deadAir:$('dead-air').value==='true',deadAirGap:$('dead-air-gap').value,deadAirPadding:$('dead-air-padding').value,useEditingStyle:$('use-editing-style')?.checked||false,adjustment:$('adjustment')?.value||'inherit',retouch:$('retouch')?.value||'inherit',entryAnimation:$('entry-animation')?.value||'',exitAnimation:$('exit-animation')?.value||'',karaokeMode:$('karaoke-mode')?.value||'highlight',subtitleColor:$('subtitle-color')?.value||'#FFD400',speakerColor1:$('speaker-color-1')?.value||'#FFFFFF',speakerColor2:$('speaker-color-2')?.value||'#FFD400'}}
 function message(value,progress){$('status').textContent=value;if(Number.isFinite(progress))$('bar').style.width=progress+'%'}
 async function save(){const form=new FormData();let data;try{data={id:projectId,name:$('name').value,captions:parseCaptions(),config:getConfig(),files:{}}}catch(error){message(error.message,0);return false}message('ກຳລັງບັນທຶກ project…',15);form.append('project',JSON.stringify(data));if($('video')?.files[0])form.append('video',$('video').files[0]);try{const response=await fetch('/api/project',{method:'POST',body:form});const result=await response.json();if(!response.ok){message(result.error||'ບັນທຶກບໍ່ໄດ້',0);return false}projectId=result.id;message('ບັນທຶກ project ສຳເລັດແລ້ວ.',100);return true}catch(error){message('ບໍ່ສາມາດເຊື່ອມຕໍ່ບໍລິການເພື່ອບັນທຶກ project.',0);return false}}
 async function post(url,payload){const response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const result=await response.json();if(!response.ok)throw Error(result.error||'ສັ່ງວຽກບໍ່ສຳເລັດ');return result}
@@ -119,7 +196,7 @@ setTimeout(()=>{const wrap=document.querySelector('.jodsub-colors');if(!wrap||do
 // AssemblyAI is the only diarization workflow; hide the retired HF/WhisperX controls.
 (()=>{for(const id of ['hf-token','save-hf-token','clear-hf-token','ai-diarize','ai-diarize-fast']){const e=document.getElementById(id);if(e)e.remove()}document.querySelectorAll('label').forEach(e=>{if(/Hugging Face|pyannote|WhisperX/i.test(e.textContent))e.remove()})})();
 </script>
-<style>.jodsub-colors{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:8px 0}.jodsub-color-card{background:#0a1323;border:1px solid #395477;border-radius:8px;padding:8px}.jodsub-color-card h3{font-size:12px;margin:0 0 6px;color:#b8c5dc}.jodsub-color-card input[type=color]{height:38px;padding:3px;cursor:pointer}@media(max-width:700px){.jodsub-colors{grid-template-columns:1fr}}</style>
+<style>.jodsub-colors{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:8px 0}.jodsub-color-card{background:#0a1323;border:1px solid #395477;border-radius:8px;padding:8px;min-width:0}.jodsub-color-card h3{font-size:12px;margin:0 0 6px;color:#b8c5dc}.jodsub-color-card input[type=color]{height:38px;padding:3px;cursor:pointer}@media(max-width:900px){.jodsub-colors{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:560px){.jodsub-colors{grid-template-columns:1fr}}</style>
 <script>
 // Keep colour controls as three distinct CapCut-like cards and persist choices.
 (()=>{const section=document.getElementById('capcut-project')?.parentElement?.parentElement;if(!section)return;const ids=['karaoke-mode','subtitle-color','speaker-color-1','speaker-color-2'];const old=[];for(const id of ids){const e=document.getElementById(id);if(e){const l=e.closest('label');if(l){old.push(l);l.remove()}}}const wrap=document.createElement('div');wrap.className='jodsub-colors';const defs=[['karaoke-mode','ປ່ຽນສີຕາມຄຳເວົ້າ','select'],['speaker-color-1','ສີ subtitle — ຄົນເວົ້າ 1','#FFFFFF'],['speaker-color-2','ສີ subtitle — ຄົນເວົ້າ 2','#FFD400']];for(const [id,title,kind] of defs){const card=document.createElement('div');card.className='jodsub-color-card';const h=document.createElement('h3');h.textContent=title;card.appendChild(h);let e=document.getElementById(id);if(!e){e=kind==='select'?document.createElement('select'):document.createElement('input');e.id=id;if(kind==='select'){e.innerHTML='<option value="highlight">ປ່ຽນສີຕາມຄຳ</option><option value="single">ສີດຽວທັງ subtitle</option>'}else{e.type='color';e.value=kind}}card.appendChild(e);wrap.appendChild(card);const saved=localStorage.getItem('jodsub-'+id);if(saved)e.value=saved;e.addEventListener('change',()=>localStorage.setItem('jodsub-'+id,e.value))}section.insertBefore(wrap,document.getElementById('capcut-project').parentElement)})();
@@ -135,4 +212,12 @@ setTimeout(()=>{const wrap=document.querySelector('.jodsub-colors');if(!wrap||do
 </script>
 <script>
 (()=>{const settings=document.getElementById('dead-air-settings');if(!settings||document.getElementById('use-editing-style'))return;const label=document.createElement('label');label.innerHTML='<input id="use-editing-style" type="checkbox" style="width:auto"> ໃຊ້ Editing Profile ທີ່ຮຽນຈາກ reference projects';settings.insertAdjacentElement('afterend',label);const note=document.createElement('p');note.className='hint';note.textContent='ໃຊ້ໄດ້ເມື່ອ profile ມີຫຼັກຖານຈາກຢ່າງນ້ອຍ 3 projects.';label.insertAdjacentElement('afterend',note)})();
+</script>
+<script>
+// Safe one-click CapCut handoff: normal quit, wait for its Save dialog, then relaunch.
+(()=>{const standard=document.getElementById('capcut');if(!standard||document.getElementById('capcut-auto'))return;const button=document.createElement('button');button.id='capcut-auto';button.type='button';button.textContent='ອັດຕະໂນມັດ: Save/ປິດ → ສ້າງ → ເປີດ CapCut';button.style.marginBottom='8px';standard.parentElement.insertBefore(button,standard);button.onclick=async()=>{if(!await save())return;const capcutId=document.getElementById('capcut-project').value;if(!capcutId){message('ເລືອກ CapCut project ກ່ອນ.',0);return}if(!confirm('JodSub ຈະໃຫ້ CapCut ບັນທຶກ/ປິດຕາມປົກກະຕິ, ສ້າງ Timeline 2, ແລ້ວເປີດ CapCut ຄືນ. ດຳເນີນຕໍ່ບໍ?'))return;try{await post('/api/capcut-auto',{id:projectId,capcutId});message('ກຳລັງສັ່ງ CapCut ບັນທຶກ/ປິດ…',5)}catch(e){message(e.message,0)}}})();
+</script>
+<script>
+// CapCut projects are read from its local project folder; no export is needed.
+(()=>{const select=document.getElementById('capcut-project');if(!select||document.getElementById('refresh-capcut-projects'))return;const refresh=document.createElement('button');refresh.id='refresh-capcut-projects';refresh.type='button';refresh.className='secondary';refresh.textContent='↻ ໂຫຼດ project CapCut ໃໝ່';select.insertAdjacentElement('afterend',refresh);refresh.onclick=async()=>{const current=select.value;refresh.disabled=true;try{const data=await fetch('/api/capcut-projects?refresh='+Date.now()).then(r=>r.json());select.innerHTML='<option value="">ເລືອກ project…</option>'+(data.projects||[]).map(p=>`<option value="${p.id}">${p.name}</option>`).join('');if([...select.options].some(o=>o.value===current))select.value=current;message(`ອ່ານ project CapCut ໂດຍກົງໄດ້ ${data.projects?.length||0} project.`,100)}catch(e){message('ອ່ານ project CapCut ບໍ່ໄດ້: '+e.message,0)}finally{refresh.disabled=false}}})();
 </script>
